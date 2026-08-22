@@ -1,3 +1,3 @@
-module github.com/MaksMakarskyi/option
+module github.com/MaksMakarskyi/go-option
 
 go 1.27.0
