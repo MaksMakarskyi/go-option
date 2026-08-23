@@ -2,6 +2,7 @@ package option
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -265,11 +266,29 @@ func TestGet(t *testing.T) {
 }
 
 func TestExpect(t *testing.T) {
-	t.Run("some does not panic", func(t *testing.T) {
-		_, panicked := recoverPanic(t, func() { Some(45).Expect("must hold a value") })
+	t.Run("some returns the value without panicking", func(t *testing.T) {
+		var res int
+		_, panicked := recoverPanic(t, func() { res = Some(45).Expect("must hold a value") })
 
 		if panicked {
-			t.Errorf("Want: %+v, Got: %+v", false, panicked)
+			t.Fatalf("Want: %+v, Got: %+v", false, panicked)
+		}
+
+		if res != 45 {
+			t.Errorf("Want: %+v, Got: %+v", 45, res)
+		}
+	})
+
+	t.Run("some of the zero value returns it", func(t *testing.T) {
+		var res int
+		_, panicked := recoverPanic(t, func() { res = Some(0).Expect("must hold a value") })
+
+		if panicked {
+			t.Fatalf("Want: %+v, Got: %+v", false, panicked)
+		}
+
+		if res != 0 {
+			t.Errorf("Want: %+v, Got: %+v", 0, res)
 		}
 	})
 
@@ -395,19 +414,24 @@ func TestUnwrapOrZero(t *testing.T) {
 	}
 }
 
-func TestUnwrapOrErr(t *testing.T) {
+func TestOkOr(t *testing.T) {
+	errMissing := errors.New("the port is not configured")
+
 	tests := map[string]struct {
 		opt       Option[int]
+		err       error
 		wantValue int
 		wantErr   error
 	}{
-		"some": {opt: Some(45), wantValue: 45, wantErr: nil},
-		"none": {opt: None[int](), wantValue: 0, wantErr: ErrValueIsNone},
+		"some":              {opt: Some(45), err: errMissing, wantValue: 45, wantErr: nil},
+		"some of zero":      {opt: Some(0), err: errMissing, wantValue: 0, wantErr: nil},
+		"none":              {opt: None[int](), err: errMissing, wantValue: 0, wantErr: errMissing},
+		"none with nil err": {opt: None[int](), err: nil, wantValue: 0, wantErr: ErrValueIsNone},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			res, err := tc.opt.UnwrapOrErr()
+			res, err := tc.opt.OkOr(tc.err)
 
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Want: %+v, Got: %+v", tc.wantErr, err)
@@ -418,9 +442,103 @@ func TestUnwrapOrErr(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a none matches both the sentinel and the given error", func(t *testing.T) {
+		_, err := None[int]().OkOr(errMissing)
+
+		if !errors.Is(err, ErrValueIsNone) {
+			t.Errorf("Want: %+v, Got: %+v", ErrValueIsNone, err)
+		}
+
+		if !errors.Is(err, errMissing) {
+			t.Errorf("Want: %+v, Got: %+v", errMissing, err)
+		}
+	})
+
+	t.Run("reads as the sentinel followed by the given error", func(t *testing.T) {
+		_, err := None[int]().OkOr(errMissing)
+
+		want := ErrValueIsNone.Error() + ": " + errMissing.Error()
+		if err.Error() != want {
+			t.Errorf("Want: %+v, Got: %+v", want, err.Error())
+		}
+	})
+
+	t.Run("a nil error leaves no formatting artefact", func(t *testing.T) {
+		// fmt would otherwise render a nil %w as "%!w(<nil>)".
+		_, err := None[int]().OkOr(nil)
+
+		if want := ErrValueIsNone.Error(); err.Error() != want {
+			t.Errorf("Want: %+v, Got: %+v", want, err.Error())
+		}
+	})
+
+	t.Run("keeps an error the caller already wrapped", func(t *testing.T) {
+		_, err := None[int]().OkOr(fmt.Errorf("loading config: %w", errMissing))
+
+		if !errors.Is(err, errMissing) {
+			t.Errorf("Want: %+v, Got: %+v", errMissing, err)
+		}
+	})
 }
 
-func TestMapSome(t *testing.T) {
+func TestOkOrElse(t *testing.T) {
+	errMissing := errors.New("the port is not configured")
+
+	tests := map[string]struct {
+		opt       Option[int]
+		wantValue int
+		wantErr   error
+		wantCalls int
+	}{
+		"some":         {opt: Some(45), wantValue: 45, wantErr: nil, wantCalls: 0},
+		"some of zero": {opt: Some(0), wantValue: 0, wantErr: nil, wantCalls: 0},
+		"none":         {opt: None[int](), wantValue: 0, wantErr: errMissing, wantCalls: 1},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			res, err := tc.opt.OkOrElse(func() error {
+				calls++
+				return errMissing
+			})
+
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Want: %+v, Got: %+v", tc.wantErr, err)
+			}
+
+			if res != tc.wantValue {
+				t.Errorf("Want: %+v, Got: %+v", tc.wantValue, res)
+			}
+
+			if calls != tc.wantCalls {
+				t.Errorf("Want: %+v calls, Got: %+v", tc.wantCalls, calls)
+			}
+		})
+	}
+
+	t.Run("does not wrap the sentinel", func(t *testing.T) {
+		// Unlike OkOr, fn's error is passed through untouched.
+		_, err := None[int]().OkOrElse(func() error { return errMissing })
+
+		if errors.Is(err, ErrValueIsNone) {
+			t.Errorf("Want: %+v, Got: %+v", "no ErrValueIsNone", err)
+		}
+	})
+
+	t.Run("keeps the error of fn wrappable", func(t *testing.T) {
+		_, err := None[int]().OkOrElse(func() error {
+			return fmt.Errorf("loading config: %w", errMissing)
+		})
+
+		if !errors.Is(err, errMissing) {
+			t.Errorf("Want: %+v, Got: %+v", errMissing, err)
+		}
+	})
+}
+
+func TestMap(t *testing.T) {
 	itoa := func(i int) string { return strconv.Itoa(i) }
 
 	tests := map[string]struct {
@@ -436,7 +554,7 @@ func TestMapSome(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			calls := 0
-			res := tc.opt.MapSome(func(i int) string {
+			res := tc.opt.Map(func(i int) string {
 				calls++
 				return itoa(i)
 			})
@@ -452,7 +570,7 @@ func TestMapSome(t *testing.T) {
 	}
 
 	t.Run("maps to a different type", func(t *testing.T) {
-		res := Some("test").MapSome(func(s string) int { return len(s) })
+		res := Some("test").Map(func(s string) int { return len(s) })
 
 		if res != Some(4) {
 			t.Errorf("Want: %+v, Got: %+v", Some(4), res)
